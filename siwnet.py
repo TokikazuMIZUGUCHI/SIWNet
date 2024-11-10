@@ -2,6 +2,7 @@ import torch
 import torchvision.transforms as transforms
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.autograd.profiler as profiler
 import torch.optim as optim
 import numpy as np
 import time
@@ -49,10 +50,10 @@ class SIWNet:
         # initialise dataloaders
         self.trainset = FrictionDataset(train_path, train_transforms)
         self.trainloader = torch.utils.data.DataLoader(dataset = self.trainset, 
-            batch_size = 32, shuffle = True, num_workers = 4)
+            batch_size = 64, shuffle = True, num_workers = 8)
         self.testset = FrictionDataset(test_path, self.test_transforms)
         self.testloader = torch.utils.data.DataLoader(dataset = self.testset, 
-            batch_size = 32, shuffle = False)
+            batch_size = 64, shuffle = False)
         
         # read parameters from file
         with open(params_path) as params_json:
@@ -65,6 +66,8 @@ class SIWNet:
         self._train_base_net()
         self._train_pi_head()
 
+    import torch.autograd.profiler as profiler
+
     def _train_base_net(self):
         # function for training the base net
 
@@ -74,28 +77,34 @@ class SIWNet:
             return
         
         criterion = nn.MSELoss()
-        optimizer = optim.SGD(self.base_net.parameters(), lr = self.params["base_lr"], 
-                momentum = 0.9, weight_decay = self.params["base_wd"])
-        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size = 20, gamma = 0.1)
+        optimizer = optim.SGD(self.base_net.parameters(), lr=self.params["base_lr"], 
+                            momentum=0.9, weight_decay=self.params["base_wd"])
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.1)
         
         # perform training on provided data
         print("Training base net")
         self.base_net.train()
-        for epoch in range(self.params["epochs"]):
-            if epoch % 10 == 0:
-                print("Epoch:", epoch)
-            # loop through training data  
-            for i, (img, label) in enumerate(self.trainloader):
-                optimizer.zero_grad()
-                img, label = img.to(self.device), label.to(self.device) 
-                # base net outputs the point estimate as well as the features
-                prediction, features = self.base_net(img)                 
-                label = torch.unsqueeze(label, 1)
-                loss = criterion(prediction, label)
-                loss.backward()
-                optimizer.step()
 
-            scheduler.step()
+        # プロファイリングを開始
+        with profiler.profile(use_cuda=True) as prof:
+            for epoch in range(self.params["epochs"]):
+                if epoch % 10 == 0:
+                    print("Epoch:", epoch)
+                # loop through training data  
+                for i, (img, label) in enumerate(self.trainloader):
+                    optimizer.zero_grad()
+                    img, label = img.to(self.device), label.to(self.device)
+                    # base net outputs the point estimate as well as the features
+                    prediction, features = self.base_net(img)                 
+                    label = torch.unsqueeze(label, 1)
+                    loss = criterion(prediction, label)
+                    loss.backward()
+                    optimizer.step()
+
+                scheduler.step()
+        
+        # プロファイリング結果を表示
+        print(prof.key_averages().table(sort_by="cuda_time_total"))
 
         # test on provided data
         self.base_net.eval()
@@ -104,7 +113,7 @@ class SIWNet:
             test_error = []
             # loop through testing data
             for i, (img, label) in enumerate(self.testloader):
-                img, label = img.to(self.device), label.to(self.device) 
+                img, label = img.to(self.device), label.to(self.device)
                 prediction, _ = self.base_net(img)
                 label = torch.unsqueeze(label, 1)
 
@@ -133,6 +142,7 @@ class SIWNet:
                     f.write(str(mae) + ',')
                     f.write(str(mse) + ',')
                     f.write(str(rmse) + '\n')
+
 
     def _train_pi_head(self):
         # function for training the PI head
